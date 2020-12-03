@@ -1,0 +1,1447 @@
+---
+title: "Klassifikation von Corona Patienten"
+output: 
+  html_document:
+   toc: true
+   toc_depth: 3
+---
+
+
+# Einleitung 
+
+Im Rahmen des Algorithmus und Statistik 2 Lab wird hier ein Datensatz zur vertieften Analyse und Modellierung vorgestellt. Die Gruppe (Gruppe L) setzt sich aus folgenden Mitgliedern zusammen: 
+
+* Bernd Kaufmann (1910837033)
+* Tobias Gosch (1910837735)
+* Reto Heller (1910837262)
+* Louis Heublein (1910837388)
+* Julian Bialas (1910837917)
+
+# Datensatz
+
+## Beschreibung
+
+Die Datengrundlage für das Projekt kann in einer [Kaggle Challenge](https://www.kaggle.com/einsteindata4u/covid19) gefunden werden. Die Daten beinhalten anonymisierte Informationen über Verdachtsfälle von Corona aus dem Israelita Albert Einstein Hospital in Sauó Paulo, Brasilien. Hier wurden 5644 Patienten auf Corona getestet. Auch werden Daten über Vorerkrankungen, Blutwerten, Alter und Weiteres zur Verfügung gestellt. Der Datensatz wurde bereits im Kontext des Machine Learning Lab 1 aufbereitet; die dort durchgeführten Schritte sind unten zu finden. Die Spalten, welche übergeblieben sind sind folgende: 
+
+* `target`: corona test resultat
+* `Patient.age.quantile`: Alter des Patienten als quantil 
+* `sickness`: Patient hat Vorerkrankung
+* `Patient.addmited.to.regular.ward..1.yes..0.no.`: Patient wurde im Krankenhaus aufgenommen
+* `Patient.addmited.to.semi.intensive.unit..1.yes..0.no.`: Patent wurde auf eine Vorstufe der Intensivstation aufgenommen
+* `Patient.addmited.to.intensive.care.unit..1.yes..0.no.`: Patient wurde auf Intensivstation aufgenommen
+* `Hematocrit`: Hämatokrit Konzentration
+* `Platelets`: Thrombozyten Konzentration 
+* `Mean.platelet.volume`: Mittlere Thrombozyten Volumen
+* `Lymphocytes`: Lymphocyten Konzentration
+* `Mean.corpuscular.hemoglobin.concentrationÂ..MCHC.`: a measure of the concentration of haemoglobin in a given volume of packed red blood cell.
+* `Leukocytes`: Leukocytes Konzentration
+* `Basophils`: white blood cells from the bone marrow, Konzentration 
+* `Mean.corpuscular.hemoglobin..MCH.`
+* `Eosinophils`
+* `Monocytes`: Monozyten Konzentration 
+* `Red.blood.cell.distribution.width..RDW.`: Spannweite der Verteilung der roten Blutkörper
+
+Alle kontinuierlichen Daten sind zentriert. Die Daten beinhalten **nur 8,4% corona-positive Patienten**.
+
+
+## Cleaning 
+
+In einem [jupyter notebook](corona.html) wurden schon einige Schritte des Preprocessing durchgeführt. Die meisten davon waren notwendig, um die große Anzahl an Nullwerten zu entfernen/ersetzen. Folgende Schritte wurden durchgeführt: 
+
+* Alle Spalten mit mehr als 90% NAs wurden entfernt
+* Die Patienten ID wurde entfernt
+* Konstante Spalten wurden entfernt
+* Spalten die zu einer anderen zu 0.85 Korrelation zeigen wurden entfernt
+* Zeilen die einen hohen Wert an NAs beinhalten wurden entfernt
+* Die Spalte `sickness` wurde erstellt. Sie beträgt 1, falls einer von den vielen durchgeführten (nicht-corona) Tests positiv ist. Sprich, wenn eine Vorerkrankung besteht. 
+* Die restlichen NAs wurden mit KNN imputiert. **Da viele Werte nur NAs als Nachbarn haben, wurde meist der mean als Alternative genommen. Das resultiert darin, dass extrem viele Werte um 0 (Daten sind zentriert) liegen.**
+
+## Vorbereitung in R
+
+
+### Daten einlesen
+```{r, setup, message=F, warning=F, error=F}
+library(kableExtra)
+library(knitr)
+library(dplyr)
+library(caret)
+```
+
+```{r}
+data_clean <- read.csv("data/clean/data_clean.csv")
+str(data_clean)
+```
+
+```{r}
+data_clean %>% head() %>% kable() %>% kable_styling(font_size = 6)
+```
+
+```{r}
+transform_type <- function(df){
+  # iterate over columns 
+  for (col_oi in colnames(df)){
+    
+    # and transform to factor (if it has little unique values)
+    if (df[, col_oi] %>% unique() %>% length() < 10){
+      df[, col_oi] <- as.factor(df[, col_oi])
+      
+    }else{
+      # else transform to numeric
+      df[, col_oi] <- as.numeric(df[, col_oi])
+    }
+  }
+  return(df)
+}
+
+data_clean <- transform_type(data_clean)
+print(str(data_clean))
+```
+
+
+### Visualization 
+
+Hier erkennt man recht gut, dass bei allen Blutwerten so wenig Daten vorhanden waren, dass es beim KNN-imputieren mit dem Mittelwert (ca. 0) ersetzt wurde. 
+
+```{r, message=F, warning=F, error=F}
+plot_col <- function(df, col){
+  g <- ggplot(data = df, mapping = aes_string(col)) 
+  if(is.numeric(df[,col])){
+    g <- g + geom_histogram(position = "identity", aes(fill=target))
+  }else{
+    g <- g + geom_histogram(stat = "count", aes(fill=target))
+  }
+  print(g)
+}
+
+for (col in colnames(data_clean)){
+  plot_col(data_clean, col)
+}
+```
+
+
+
+
+
+
+
+### Train Test Split
+
+```{r}
+set.seed(3456)
+train_idx <- createDataPartition(data_clean$target, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+data_train <- data_clean[train_idx, ]
+data_test <- data_clean[-train_idx, ]
+
+print(dim(data_train))
+print(dim(data_test))
+
+# write.csv(x = data_train, file = "data/clean/train.csv", row.names = F)
+# write.csv(x = data_test, file = "data/clean/test.csv", row.names = F)
+```
+
+
+### Modellierbarkeit
+
+```{r}
+first_model <-  glm(target ~ sickness + Patient.age.quantile + Hematocrit, data = data_train, family = "binomial")
+print(summary(first_model))
+```
+
+```{r}
+preds <- predict(object = first_model, newdata = data_test, type = "response")
+print(preds[1:10])
+```
+
+
+## Ziele und Erwartungen
+ 
+Das Ziel dieses Projektes ist es, ein Modell zu entwerfen, dass basierend auf den obig genannten Spalten den Ausgang des Corona Tests vorhersagen kann. Das bisherige Modell hat zwar eine Präzision von 0.91, jedoch einen recall von nur 0.33. Diesen gilt es zu heben. Die große Anzahl an mean imputed Werten (siehe Beschreibung oben) könnten ein Verhängnis werden. Wir haben uns zum Ziel gesetzt ein Modell zu entwickeln, dass zuverlässig unterscheiden kann zwischen Corona Infizierten und Nicht Corona Infizierten. Wir sind uns bewusst, dass dies ein sehr schwieriges Unterfangen ist. Eventuell gelingt es uns ein Modell zu entwickeln, dass für bereits eine grobe Klassifikation vornehmen kann. Damit im Nachgang für die "unsicheren " Patienten nach einem zweiten Test Gewissheit herrscht.
+
+
+## Feature engineering
+
+Im unten abgebildeten Code beschäftigen wir uns mit feature engineering. Hierbei wählen wir zunächst die interressanten numerischen features aus und transformieren und kombinieren sie so, dass die corona erkrankten im Schnitt einen höhrer Wert erlangen. 
+So generieren wir einige features. Bevor wir foreward selection anwenden, um zwei features hinzuzufügen, entfernen wir zwei durch backward selection. 
+
+```{r eval=F}
+###########################
+# get data
+###########################
+
+data_train <- read.csv("data/clean/train.csv")
+data_test <- read.csv("data/clean/test.csv")
+
+transform_type <- function(df){
+  # iterate over columns 
+  for (col_oi in colnames(df)){
+    
+    # and transform to factor (if it has little unique values)
+    if (df[, col_oi] %>% unique() %>% length() < 10){
+      df[, col_oi] <- as.factor(df[, col_oi])
+      
+    }else{
+      # else transform to numeric
+      df[, col_oi] <- as.numeric(df[, col_oi])
+    }
+  }
+  return(df)
+}
+
+#####
+# upsample
+#####
+
+data_train <- transform_type(data_train)
+data_test <- transform_type(data_test)
+
+data_train_up <- upSample(x = data_train[, -ncol(data_train)],
+                         y = data_train$target)
+data_train_up <- data_train_up %>%
+  select(-Class)
+
+
+
+#############
+# interesting features
+#############
+
+# look at the interesting features and first map them to the intervall [0,1]. Then (we want the final)
+# variable have large values for corona patients) map small values to large ones (1-x). Finally 
+# take the e function to guarantee that all values are positive (the upper described transformation could
+# otherwise result in negative values for the test data)
+
+extract_feat <- function(df){
+  feat_oi <- list(
+    "age" = exp((df$Patient.age.quantile - min(data_train_up$Patient.age.quantile))/(max(data_train_up$Patient.age.quantile) - min(data_train_up$Patient.age.quantile))),
+    "plat" = exp(1 - (df$Platelets - min(data_train_up$Platelets))/(max(data_train_up$Platelets) - min(data_train_up$Platelets))),
+    "leuk" = exp(1 - (df$Leukocytes - min(data_train_up$Leukocytes))/(max(data_train_up$Leukocytes) - min(data_train_up$Leukocytes))),
+    "eos" = exp(1 - (df$Eosinophils - min(data_train_up$Eosinophils))/(max(data_train_up$Eosinophils) - min(data_train_up$Eosinophils)))
+  )
+  return(feat_oi)
+}
+
+feat_train <- extract_feat(data_train_up)
+feat_test <- extract_feat(data_test)
+
+# create all possible combinations of the three variables
+comb_table <- combn(x = names(feat_train), 3)
+
+
+# function that multiplies the features and returns vector of the result
+create_feature <- function(name_vec, feat_oi){
+  res <- 1
+  for(name in name_vec){
+    res <- res * feat_oi[[name]]
+  }
+  return(res)
+}
+
+
+# function that returns a list with all the combinations. Each element in list has a proper name.
+# e.g (aes_dfs_dsf for the vector aes dfs dsf)
+create_namevecs <- function(){
+  name_vec_list <- list()
+  list_names <- c()
+  for (i in 1:ncol(comb_table)){
+    list_names <- c(list_names, paste(comb_table[,i], collapse = "_"))
+    name_vec_list[[length(name_vec_list) + 1]] <- comb_table[,i]
+  }
+  # add combination of all four cols 
+  list_names <- c(list_names, paste(names(feat_train), collapse = "_"))
+  name_vec_list[[length(name_vec_list) + 1]] <- names(feat_train)
+
+  names(name_vec_list) <- list_names
+  return(name_vec_list)
+}
+
+feat_list <- create_namevecs()
+
+#####
+# create the feature data frame for the training and test
+#####
+for (feat_name in names(feat_list)){
+  eval(parse(text=paste0(feat_name, "= create_feature(feat_list[[feat_name]], feat_train)")))
+}
+
+eval(parse(text=paste0("feat_df_train = data.frame(", paste(names(feat_list), collapse = ','),")")))
+
+for (feat_name in names(feat_list)){
+  eval(parse(text=paste0(feat_name, "= create_feature(feat_list[[feat_name]], feat_test)")))
+}
+
+eval(parse(text=paste0("feat_df_test = data.frame(", paste(names(feat_list), collapse = ','),")")))
+
+####################
+# plot created features
+####################
+
+for (col in colnames(feat_df_train)){
+  plot_df <- data.frame(target = data_train_up$target, feat = feat_df_train[, col])
+  print(ggplot(data = plot_df) + geom_histogram(mapping = aes_string(fill = "target", x = "feat")) + xlab(col))
+}
+
+for (col in colnames(feat_df_train)){
+  plot_df <- data.frame(target = data_test$target, feat = feat_df_test[, col])
+  print(ggplot(data = plot_df) + geom_histogram(mapping = aes_string(fill = "target", x = "feat")) + xlab(col))
+}
+
+
+####################
+# feature selection
+####################
+
+# to evaluate the the dataframe we will create a simple svm with similar parameters to @Louis svm. 
+# returns the test accuracy. Ideally we would do this on an validation dataframe, but the dataset is 
+# too small for that. 
+eval_df <- function(data_train_oi, data_test_oi){
+  set.seed(123)
+  
+  fitControl <- trainControl(## 10-fold CV
+    method = "repeatedcv",
+    number = 10,
+    ## repeated ten times
+    repeats = 3)
+  
+  svm_fit_radial <- train(target ~ ., data = data_train_oi, 
+                          method = "svmRadial", 
+                          trainControl = fitControl)
+  
+  prediction_radial <- svm_fit_radial %>% predict(data_test_oi)
+  return(mean(prediction_radial == data_test_oi$target))
+}
+
+
+###################
+# Backward elimination
+###################
+
+# initial values
+final_df_train <- data_train_up
+final_df_test <- data_test
+unselected_feat <- colnames(feat_df_train)
+acc_thresh <- eval_df(data_train_oi = data_train_up, 
+                      data_test_oi = data_test)
+selected_feat <- c()
+dropped_feat <- c()
+
+# here we will drop a feature in each interation (in case it makes an improvement to the accuracy)
+for (iter in c(1,2)) {
+  feat_to_drop <- NA
+  for (feat_oi in colnames(final_df_train)[colnames(final_df_train) != "target"]) {
+    tmp_df_train <- final_df_train[,! colnames(final_df_train) %in% c(feat_oi)]
+    tmp_df_test <- final_df_test[,! colnames(final_df_test) %in% c(feat_oi)]
+
+    tmp_acc <- eval_df(data_train_oi = tmp_df_train, 
+                       data_test_oi = tmp_df_test)
+    print(feat_oi)
+    print(tmp_acc)
+    if (tmp_acc >= acc_thresh){
+      acc_thresh <- tmp_acc
+      feat_to_drop <- feat_oi
+    }
+  }
+  
+  if(!is.na(feat_to_drop)){
+    dropped_feat <- c(dropped_feat, feat_to_drop)
+    final_df_test <- final_df_test[,!colnames(final_df_test) %in% dropped_feat]
+    final_df_train <- final_df_train[,!colnames(final_df_train) %in% dropped_feat]
+  }
+}
+
+##########################
+# Forward selection
+##########################
+
+# here we will select one of our created feature in each of the two iterations, 
+# that improve our model the most. 
+for (iter in c(1,2)) {
+  feat_to_select <- NA
+  for (feat_oi in unselected_feat) {
+    tmp_df_train <- final_df_train
+    tmp_df_test <- final_df_test
+    tmp_df_train[, feat_oi] <- feat_df_train[, feat_oi]
+    tmp_df_test[, feat_oi] <- feat_df_test[, feat_oi]
+    print(tmp_df_train[, feat_oi][1:5])
+    tmp_acc <- eval_df(data_train_oi = tmp_df_train, 
+                       data_test_oi = tmp_df_test)
+    print(tmp_acc)
+    if (tmp_acc >= acc_thresh){
+      acc_thresh <- tmp_acc
+      feat_to_select <- feat_oi
+    }
+  }
+  if(!is.na(feat_to_select)){
+    selected_feat <- c(selected_feat, feat_to_select)
+    unselected_feat <- unselected_feat[-which(unselected_feat == feat_to_select)]
+    final_df_test[, feat_to_select] <- feat_df_test[, feat_to_select]
+    final_df_train[, feat_to_select] <- feat_df_train[, feat_to_select]
+  }
+}
+
+# write.csv(final_df_test, "data/clean/test_feat_eng.csv", row.names = F)
+# write.csv(final_df_train, "data/clean/train_feat_eng.csv", row.names = F)
+```
+
+
+## Unsupervised Methode
+
+Wir verwenden nun noch eine Unsupvised Learning Methode mit einem K-means Clustering, um einen Überblick zu bekommen und zu prüfen, ob die Daten mit einen K-Means CLustering gut zu clustern sind oder ob es keinen Sinn macht. Wir clustern die gesamten Daten mit einem K= 2, für die beiden Outputs (krank oder gesund).
+Wir werden eine Principal Component Analyse durchführen und anhand der ersten beiden Hauptkomponenten prüfen, ob sich dadurch ein sinnvolles Clustering ergibt. Dadurch erwarten wir uns noch einen etwas besseren Überblick über die Komplexität des Datensatzes.
+
+```{r}
+clust_data <- data_clean
+clust_data$Patient.age.quantile <- as.numeric(clust_data$Patient.age.quantile)
+clust_data$Patient.addmited.to.regular.ward..1.yes..0.no. <- as.numeric(clust_data$Patient.addmited.to.regular.ward..1.yes..0.no.)
+clust_data$Patient.addmited.to.semi.intensive.unit..1.yes..0.no. <- as.numeric(clust_data$Patient.addmited.to.semi.intensive.unit..1.yes..0.no.)
+clust_data$Patient.addmited.to.intensive.care.unit..1.yes..0.no. <- as.numeric(clust_data$Patient.addmited.to.intensive.care.unit..1.yes..0.no.)
+clust_data$sickness <- as.numeric(clust_data$sickness)
+
+clust_data <- clust_data %>%
+  select(-target)
+```
+
+
+```{r}
+kmeans <- kmeans(clust_data , centers=2, nstart = 10)
+cluster_sizes <- kmeans$size
+cluster_sizes
+
+```
+Das Clustering ergibt deutlich balanciertere Daten als wir es in unserem Datensatz haben. Dies lässt bereits darauf schließen, dass ein K-Means CLustering wenig sinnvoll ist für diese Daten.
+
+```{r}
+clust_pcov <- prcomp(clust_data, scale=T)
+clust_pcov
+```
+
+
+```{r}
+biplot(clust_pcov, main = "Biplot Princomp Method", expand = 1, col = c("blue", "red"))
+```
+
+
+```{r}
+library(factoextra)
+fviz_cluster(kmeans, geom = "point", data = clust_pcov$x[,1:2]) + ggtitle(" K = 2 mit PCA")
+```
+Dieser Plot der Cluster zeigt deutlich, dass sich die einzelnen Punkte in den Clustern sehr stark überschneiden, deswegen ist es durch eine solche Cluster Methode nicht möglich zu prüfen ob ein Patient gesund oder mit Corona Infiziert ist.
+
+
+Nach diesem ersten Überblick würden wir davon ausgehen, dass, auch auf Grund der Unbalanciertheit der Daten in Richtung nicht Corona infiziert, die Modelle sich leichter tun eine hohe Sensitivity zu erreichen, das erkennen von Corona Infizierten jedoch schwer werden könnte. Beginnen wir nun mit der entwicklung verschiedener Modelle zur Klassifizierung:
+
+
+
+## Support Vector Machines (SMVs)
+
+In diesem Abschnitt wird versucht mit Hilfe von Support Vector Machines (SVMs) die Klassifizierung einer Corona Erkrankung zu verbessern.
+
+```{r}
+plot_1 <- ggplot(data=data_train, aes(target)) + 
+  geom_bar(stat = "count")
+plot_1 <- plot_1 + ggtitle("Übersicht Klassen in Trainingsdatensatz") +
+  xlab("Klassen") + ylab("Anzahl Observations pro Klasse") + scale_fill_brewer(palette="Dark2") + 
+  theme(plot.title = element_text(hjust = 0.5))
+plot_1
+```
+
+Der Trainingsdatensatz ist stark unbalanciert. Das heißt, das oben beschriebene, Rare Class Problem bei der Klassifizierung liegt definitv vor.
+
+```{r}
+table(data_train$target)
+```
+```{r}
+#set.seed(1910837262)
+#up_train_svm <- upSample(x = data_train[, -ncol(data_train)],
+                     #y = data_train$target)                         
+#table(up_train_svm$target) 
+```
+
+
+```{r}
+#up_train_svm <- up_train_svm %>%
+    #select(-Class)
+#print(str(up_train_svm))
+```
+Um eine bessere Trainingsgrundlage für das SVM zu haben, führen wir ein Upsampling der Trainingsdaten durch. Damit beheben wir das Rare Class Problem im Trainingsdatensatz. Nun haben wir im Trainingsdatensatz jeweils 380 Corona Infizierte und 380 Nicht Corona Infizierte.
+Allerdings werden diese Datensaätz aufgrund des Feature Engineerings nicht mehr benötigt.
+
+```{r}
+up_train_svm <- read.csv("data/clean/train_feat_eng.csv")
+data_test <- read.csv("data/clean/test_feat_eng.csv")
+```
+
+```{r}
+str(up_train_svm)
+```
+```{r}
+up_train_svm <- transform_type(up_train_svm)
+data_test <- transform_type(data_test)
+```
+
+```{r}
+str(up_train_svm)
+```
+
+```{r}
+methods = list("lssvmPoly", "lssvmRadial", "svmBoundrangeString", "svmRadialWeights", "svmExpoString", "svmLinear", "svmPoly", "svmRadial", "svmRadialCos", "svmRadialSigma", "svmSpectrumString")
+```
+
+```{r}
+set.seed(1910837388)
+
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 3)
+
+svm_fit_linear <- train(target ~ ., data = up_train_svm, 
+                 method = "svmLinear", 
+                 trControl = fitControl,
+                 verbose = FALSE)
+svm_fit_linear
+```
+
+```{r}
+set.seed(1910837388)
+
+svm_fit_linear <- train(target ~ ., data = up_train_svm, 
+                 method = "svmLinear", 
+                 trControl = fitControl,
+                 tuneGrid = expand.grid(C = seq(0.000000001, 5, length = 50)),
+                 verbose = FALSE)
+svm_fit_linear
+```
+
+Optimierung des Tuning Parameters C, erst mit großer Range, dann im nächsten Schritt mit kleinere Range, aber auf die Ergebnisse des ersten Tests angepasst.
+
+```{r}
+set.seed(1910837388)
+svm_fit_linear <- train(target ~ ., data = up_train_svm, 
+                 method = "svmLinear", 
+                 trControl = fitControl,
+                 tuneGrid = expand.grid(C = seq(0.01, 0.3, length = 50)),
+                 verbose = FALSE)
+svm_fit_linear
+```
+
+```{r}
+# Plot model accuracy vs different values of Cost
+plot(svm_fit_linear)
+```
+Der Plot zeigt uns nochmal schön, was uns die Verherige Berechnung von ausgegeben hat. C = 0.0514 erzielt für das Modell die beste Accuracy auf den Trainingsdaten. Nun ermitteln wir die Accuracy für die Testdaten:
+```{r}
+prediction_linear <- svm_fit_linear %>% predict(data_test)
+mean(prediction_linear == data_test$target)
+```
+
+
+Berechnen wir nun ein anderes, nicht lineares Modell, genau wie davor erstmal ohne Tuning Parameter, um uns dann anzunähern:
+```{r}
+set.seed(1910837388)
+
+svm_fit_radial <- train(target ~ ., data = up_train_svm, 
+                 method = "svmRadial", 
+                 tuneLength = 9,
+                 trControl = fitControl,
+                 verbose = FALSE)
+svm_fit_radial
+```
+
+```{r}
+set.seed(1910837388)
+# Use the expand.grid to specify the search space	
+grid <- expand.grid(sigma = seq(0.01, 0.1, length = 10),
+                    C = seq(14, 18, length = 20))
+
+svm_fit_radial <- train(target ~ ., data = up_train_svm, 
+                 method = "svmRadial", 
+                 tuneGrid = grid,
+                 trControl = fitControl,
+                 verbose = FALSE)
+svm_fit_radial
+```
+
+```{r}
+# Plot model accuracy vs different values of Cost
+plot(svm_fit_radial)
+```
+
+```{r}
+prediction_radial <- svm_fit_radial %>% predict(data_test)
+mean(prediction_radial == data_test$target)
+```
+
+```{r}
+set.seed(1910837388)
+
+svm_fit_poly <- train(target ~ ., data = up_train_svm, 
+                 method = "svmPoly", 
+                 tuneLength = 4,
+                 trControl = fitControl,
+                 verbose = FALSE)
+svm_fit_poly
+```
+
+The final values used for the model were degree = 2, scale = 1 and C = 1.
+
+```{r}
+#set.seed(1910837388)
+
+#grid <- expand.grid(degree = seq(1, 4, length = 4),
+                    #scale = seq(0.5, 2, length = 10),
+                    #C = seq(0.5, 2, length = 10))
+
+#svm_fit_poly <- train(target ~ ., data = up_train_svm, 
+                 #method = "svmPoly", 
+                 #tuneGrid = grid,
+                 #trControl = fitControl,
+                 #verbose = FALSE)
+#svm_fit_poly
+```
+
+The final values used for the model were degree = 2, scale = 0.66667 and C = 0.5.
+
+```{r}
+set.seed(1910837388)
+
+grid <- expand.grid(degree = seq(2, 2, length = 1),
+                    scale = seq(0.5, 0.7, length = 10),
+                    C = seq(0.4, 0.6, length = 10))
+
+svm_fit_poly <- train(target ~ ., data = up_train_svm, 
+                 method = "svmPoly", 
+                 tuneGrid = grid,
+                 preProc = c("center","scale"),
+                 trControl = fitControl,
+                 verbose = FALSE)
+svm_fit_poly
+```
+
+The final values used for the model were degree = 2, scale = 0.633333 and C = 0.6.
+
+```{r}
+plot(svm_fit_poly)
+```
+
+
+```{r}
+prediction_poly <- svm_fit_poly %>% predict(data_test)
+mean(prediction_poly == data_test$target)
+```
+
+```{r}
+set.seed(1910837388)
+
+svm_fit_RSigma <- train(target ~ ., data = up_train_svm, 
+                 method = "svmRadialSigma",
+                 trControl = trainControl(method = "cv"),
+                 verbose = FALSE)
+svm_fit_RSigma
+```
+```{r}
+prediction_RSigma <- svm_fit_RSigma %>% predict(data_test)
+mean(prediction_RSigma == data_test$target)
+```
+
+```{r}
+plot(svm_fit_RSigma)
+```
+
+
+```{r}
+results_svm_linear <- data.frame(actual = data_test$target, prediction = prediction_linear)
+results_svm_radial <- data.frame(actual = data_test$target, prediction = prediction_radial)
+results_svm_poly <- data.frame(actual = data_test$target, prediction = prediction_poly)
+results_svm_RS <- data.frame(actual = data_test$target, prediction = prediction_RSigma)
+CM_linear <- confusionMatrix(table(results_svm_linear$actual,results_svm_linear$prediction))
+CM_radial <- confusionMatrix(table(results_svm_radial$actual,results_svm_radial$prediction))
+CM_poly <- confusionMatrix(table(results_svm_poly$actual,results_svm_poly$prediction))
+CM_RS <- confusionMatrix(table(results_svm_RS$actual,results_svm_RS$prediction))
+CM_linear
+CM_radial
+CM_poly
+CM_RS
+```
+
+Wenn wir uns die Confusion Matrizen der finalen Kernel mit optimierten Parametern anschauen, dann fällt uns auf, dass, unabhängig vom Kernel, die Specifity sehr niedrig ist, außer bei dem Radial Sigma Kernel und somit viele Positive Erkrankte nicht als solche erkannt werden. Im Vergleich mit den anderen Kernel scheidet der Radial Sigma Kernel jedoch deutlich besser ab, sowohl bei Accuracy, als auch bei Sensivity und Specivity. Schauen wir uns im nächsten Schritt noch eine  übersichtlichere Tabelle an:
+
+```{r}
+results <- resamples(list(Linear=svm_fit_linear, Radial=svm_fit_radial, Polynomial=svm_fit_poly))
+results$values
+
+summary(results)
+
+ 
+bwplot(results, metric="Accuracy")
+```
+
+Hier nochmal ein Vergleich der Accuracy der verschiedenen Kernel auf die Trainingsdaten. Wie man sieht ist hier der Radial Kernel der präziseste.
+
+```{r}
+modell <- c("SVM Linear", "SVM Radial", "SVM Polynomial", "SVM RadialSigma")
+accuracies <- c(CM_linear$overall[1], CM_radial$overall[1], CM_poly$overall[1], CM_RS$overall[1])
+sensitivities <- c(CM_linear$byClass[1], CM_radial$byClass[1], CM_poly$byClass[1], CM_RS$byClass[1])
+specificities <- c(CM_linear$byClass[2], CM_radial$byClass[2], CM_poly$byClass[2], CM_RS$byClass[2])
+results_svm = data.frame(
+  "Modell" = modell,
+  "Sensitivity" = sensitivities,
+  "Specificity" = specificities,
+  "Test Accuracy" = accuracies
+)
+
+kable_styling(kable(results_svm, format = "html", digits = 4), full_width = FALSE)
+
+```
+
+
+Wie man in der abschließenden Ergbnistabelle erkennen kann, performt das Radial Sigma Modell bzgl. Sensitivity ähnlich wie die anderen Modelle, hat aber eine weit höhere Specivity, was zu einer massiv besseren Accuracy führt. Dadurch ist dieses Modell auf jeden Fall zu Präferieren auf seiten der SVMs
+
+## Neuronale Netze
+
+In diesem Abschnitt wird versucht mit Hilfe von verschiedenen Neuronalen Netzen die Vorhersage einer Corona Krankheit zu verbessern.
+
+```{r}
+data_train <- data_clean[train_idx, ]
+data_test <- data_clean[-train_idx, ]
+```
+
+
+```{r}
+ggplot(data=data_train, aes(data_train$target)) + 
+  geom_histogram(stat = "count")
+```
+
+Die Responsevariable im Trainingsdatensatz weist eine ziemlich starke Imbalance aus, es liegt somit das bekannte Rare Class Problem bei der Klassifikation vor.
+
+```{r}
+table(data_train$target)
+```
+
+Um eine bessere Trainingsgrundlage für das Neuronale Netz zu haben, führen wir ein Upsampling der Trainingsdaten durch. Damit beheben wir das Rare Class Problem im Trainingsdatensatz. Nun haben wir im Trainingsdatensatz jeweils 1062 Corona Infizierte und 1062 Nicht Corona Infizierte.
+
+```{r}
+set.seed(1910837262)
+up_train_nn <- upSample(x = data_train[, -ncol(data_train)],
+                     y = as.factor(data_train$target))                         
+table(up_train_nn$target) 
+```
+
+```{r}
+up_train_nn <- up_train_nn %>%
+    select(-Class)
+print(str(up_train_nn))
+```
+
+```{r}
+data_test_x <- data_test %>%
+  select(-target)
+```
+
+
+
+Bevor wir das Neuronale Netz trainieren müssen wir zu erst die Inputdaten als zu einer Matrix umwandeln.
+
+```{r}
+library(neuralnet)
+#preprocessParams <- preProcess(up_train_nn, method=c("scale"))
+
+up_train_nn_matrix <-  as.matrix(sapply(up_train_nn, as.numeric))
+
+
+modell_nn1 <- neuralnet(target ~., data = up_train_nn_matrix, hidden=c(10), linear.output = FALSE)
+
+```
+
+Das erste Neuronale Netz wurde mit der Library Neuralnet trainiert. Die Inputdaten wurden dabei nicht skaliert und es wurde alle Features aus dem Trainingsdatensatz verwendet, um die Targetvariable vorherzusagen. Dazu haben wir im ersten Versuch ein Neuronales Netz mit einem Hiddenlayer und 10 Neuronen verwendet.
+
+
+```{r}
+plot(modell_nn1, rep = "best")
+```
+
+
+Nun wollen wir die Genauigkeit des Netzes auf den Testdaten errechnen.
+
+```{r}
+data_test_nn_x <- data_test %>%
+  select(-target)
+data_test_nn_x <-  as.matrix(sapply(data_test_nn_x, as.numeric))
+
+predict_testNN_1 = compute(modell_nn1, data_test_nn_x)
+predict_testNN_1<-sapply(predict_testNN_1$net.result,round,digits=0)
+nn_table1 <- table(data_test$target, predict_testNN_1)
+
+```
+```{r}
+results_nn1 <- data.frame(actual = data_test$target, prediction = predict_testNN_1)
+#attach(results_nn1)
+nn_table1
+
+```
+
+
+
+```{r}
+library(nnet)
+up_train_nn$target = class.ind(up_train_nn$target)
+data_test_nn <- data_test
+data_test_nn$target = class.ind(data_test_nn$target) 
+data_test_nn_x <- data_test_nn %>%
+  select(-target)
+
+```
+
+```{r}
+
+modell_nn2 <- nnet(target ~ ., data = up_train_nn, size = 2, rang = 0.1, maxit = 200, decay=5e-4, softmax = TRUE )
+```
+
+```{r}
+#import the function from Github
+library(devtools)
+source_url('https://gist.githubusercontent.com/fawda123/7471137/raw/466c1474d0a505ff044412703516c34f1a4684a5/nnet_plot_update.r')
+plot.nnet(modell_nn2)
+```
+
+
+```{r}
+predict_testNN_2 <- predict(modell_nn2, data_test_nn_x)
+predict_testNN_2<-sapply(predict_testNN_2,round,digits=0)
+```
+
+```{r}
+#table(data_test_nn$target[,2], predict_testNN_2[107:212])
+```
+
+```{r}
+conf_nn2 <-confusionMatrix(table(data_test_nn$target[,2], predict_testNN_2[105:209]))
+conf_nn2
+```
+
+Dieses einfache Neuronale Netz ommt auf eine Accuracy von etwas mehr als 76 %, dies hat auf diesen Daten aber relativ wenig Aussagekraft. Die Specificity ist die Kennzahl, die uns auf unseren Daten am meisten interessiert. Dabei kommt das Modell nur auf 23 %.
+
+```{r}
+acc_nn2 <- conf_nn2$overall[1]
+sens_nn2 <- conf_nn2$byClass[1]
+spec_nn2 <- conf_nn2$byClass[2]
+```
+
+
+### Skalieren und One Hot Encoden der Daten:
+
+Nun trainieren wir dasselbe Neuronale Netz nur mit vorverarbeiteten Daten, das heißt wir Dummy Encoden die Faktorvariablen und wir normalisieren die numerischen Daten. Danach werden wir prüfen, ob sich dadurch das Modell signifikant verbessern konnte.
+
+```{r}
+glimpse(up_train_nn)
+```
+
+
+```{r}
+library(ade4)
+library(data.table)
+ohe_feats = c( 'Patient.addmited.to.regular.ward..1.yes..0.no.', 'Patient.addmited.to.semi.intensive.unit..1.yes..0.no.', 'Patient.addmited.to.intensive.care.unit..1.yes..0.no.', "sickness")
+for (f in ohe_feats){
+  df_all_dummy = acm.disjonctif(up_train_nn[f])
+  up_train_nn[f] = NULL
+  up_train_nn = cbind(up_train_nn, df_all_dummy)
+}
+
+```
+
+```{r}
+ohe_feats = c('Patient.addmited.to.regular.ward..1.yes..0.no.', 'Patient.addmited.to.semi.intensive.unit..1.yes..0.no.', 'Patient.addmited.to.intensive.care.unit..1.yes..0.no.', "sickness")
+
+for (f in ohe_feats){
+  df_all_dummy = acm.disjonctif(data_test_nn[f])
+  data_test_nn[f] = NULL
+  data_test_nn = cbind(data_test_nn, df_all_dummy)
+}
+```
+
+
+```{r}
+preProcValues <- preProcess(up_train_nn, method = c("center", "scale"))
+
+up_train_nn_transformed <- predict(preProcValues, up_train_nn)
+data_test_nn_transformed <- predict(preProcValues, data_test_nn)
+
+data_test_nn_transformed_x <- data_test_nn_transformed %>%
+  select(-target)
+
+```
+
+
+```{r}
+modell_nn3 <- nnet(target ~ ., data = up_train_nn_transformed, size = 2, rang = 0.1, maxit = 200, decay=5e-4, softmax = TRUE )
+```
+
+```{r}
+plot.nnet(modell_nn3)
+```
+
+
+```{r}
+predict_testNN_3 <- predict(modell_nn3, data_test_nn_transformed_x)[,2]
+predict_testNN_3<-sapply(predict_testNN_3,round,digits=0)
+```
+
+```{r}
+results_nn3 <- data.frame(actual = data_test_nn$target, prediction = predict_testNN_3)
+#attach(results_nn3)
+
+table(results_nn3$actual.1,results_nn3$prediction)
+```
+
+```{r}
+conf_nn3 <- confusionMatrix(table(results_nn3$actual.1,results_nn3$prediction))
+conf_nn3
+```
+
+Das Modell mit den skalierten und encodeten Inputdaten schneidet doch deutlich besser ab. Die Specificity kommt auf 38%, was zwar immer noch nicht gut ist, aber immerhin schon einmal eine deutliche Verbesserung zum vorherigen Modell. Dieses Modell hat 3 Patienten fälschlicherweise als gesund ausgegeben, obwohl der Patient mit Corona infiziert ist.
+
+```{r}
+acc_nn3 <- conf_nn3$overall[1]
+sens_nn3 <- conf_nn3$byClass[1]
+spec_nn3 <- conf_nn3$byClass[2]
+```
+
+Nun trainieren wir noch ein Neuronale Netz Modell mit der Library Caret. Dazu werden wir die Inputdaten auch preprocessen und eine 10 Fold Cross Validation anwenden, die wir 3 mal wiederholen. Wir verwenden hier erstmal den "normalen" Trainingsdatensatz und nicht den upgesampleten.
+
+```{r}
+#Caret Modell
+TrainingParameters_nn <- trainControl(method = "repeatedcv", number = 10, repeats=3)
+modell_nn4 <- train(data_train[,-2], data_train$target,
+                  method = "nnet",
+                  trControl= TrainingParameters_nn,
+                  preProcess=c("scale","center"),
+                  na.action = na.omit
+)
+```
+
+```{r}
+plot(modell_nn4)
+```
+
+Das beste Modell ergibt sich bei einem Hiddenlayer und einem decay weight von 0.1. So wurde eine Trainingsaccuracy von 93% erreicht. Auffallend ist zudem, dass bei einem decay weight von 0.1, es gar keine Rolle spielt, wie viel Hiddenlayer es gibt, da die Accuracy stets bei ca. 93% liegt. Die Modelle mit nur leicht veränderten weights, schließen  etwas schlechter ab, mit einer Trainingsaccuracy von knapp über 89% bis 92%.
+
+```{r}
+modell_nn4_best <- modell_nn4$bestTune
+modell_nn4_best
+```
+ Das beste Modell entsteht mit 5 Hidden Units und einem Weights decay von 0,1.
+
+
+```{r}
+predict_testNN_4 = predict(modell_nn4, data_test)
+#predict_testNN_4 <-sapply(predict_testNN_4,round,digits=0)
+nn_table4 <- table(data_test$target, predict_testNN_4)
+```
+
+Auch auf den Testdaten perfomt das NN mit der Caret Funktion besser als die beiden Modelle mit der nnet-Funktion. Die Testaccuracy liegt bei über 91 %, der Recall bei 60%. Aber es wurden 5 Patienten fälschlicherweise als gesund gemeldet, obwohl Sie mit Corona infiziert sind. Dies wollen wir unebdingt vermeiden.
+
+```{r}
+results_nn4 <- data.frame(actual = data_test$target, prediction = predict_testNN_4)
+conf_nn4 <- confusionMatrix(nn_table4)
+conf_nn4
+```
+
+```{r}
+acc_nn4 <- conf_nn4$overall[1]
+sens_nn4 <- conf_nn4$byClass[1]
+spec_nn4 <- conf_nn4$byClass[2]
+```
+
+Nun trainieren wir noch ein weiteres Neuronales Netz mit der Train Function, nun werden wir als Trainingsdatensatz aber einen upsampleten Datensatz, mit balancierter Responsevariable verwenden und die Daten zu vor Dummy Encodieren. Wir sind gespannt, wie es sich im Vergleich zum Modell mit dem "normalen" Trainingsdaten verhält. 
+
+```{r}
+set.seed(1910837262)
+up_trainset_nn <- upSample(x = data_train[, -ncol(data_train)],
+                     y = as.factor(data_train$target))                         
+table(up_trainset_nn$target) 
+
+up_trainset_nn <- up_trainset_nn %>%
+    select(-Class)
+```
+
+```{r}
+for (f in ohe_feats){
+  df_all_dummy = acm.disjonctif(up_trainset_nn[f])
+  up_trainset_nn[f] = NULL
+  up_trainset_nn = cbind(up_trainset_nn, df_all_dummy)
+}
+```
+
+```{r}
+testset_nn <- data_test
+for (f in ohe_feats){
+  df_all_dummy = acm.disjonctif(testset_nn[f])
+  testset_nn[f] = NULL
+  testset_nn = cbind(testset_nn, df_all_dummy)
+}
+```
+
+
+```{r}
+#Caret Modell mit upsamplet Trainingdsatensatz:
+modell_nn5 <- train(up_trainset_nn[,-2], up_trainset_nn$target,
+                  method = "nnet",
+                  trControl= TrainingParameters_nn,
+                  preProcess=c("scale","center")
+)
+
+```
+
+
+Auffallend war, dass dieses Modell länger gerechnet hat, dies hängt vermutlich damit zusammen, dass es durch das Dummy Encoden mehr Inputvariablen zum Verarbeiten hat.
+
+```{r}
+plot(modell_nn5)
+```
+
+Die beiden neuronalen Netze mit der Train Function von Caret performen sehr ähnlich. Auch der beste Fit von den Parametern identisch. Der einzige Unterschied liegt darin, dass die Modelle mit geringeren Weights beim Modell mit One Hot Encodeden Daten und upgesamplten Trainingsset bei mehr Hidden Units besser performen. Aber der Unterschied ist im dezimalen Prozentbereich.
+
+```{r}
+modell_nn5_best <- modell_nn5$bestTune
+modell_nn5_best
+```
+
+
+```{r}
+predict_testNN_5 = predict(modell_nn5, testset_nn)
+#predict_testNN_5 <-sapply(predict_testNN_5,round,digits=0)
+nn_table5 <- table(testset_nn$target, predict_testNN_5)
+```
+
+```{r}
+results_nn5 <- data.frame(actual = testset_nn$target, prediction = predict_testNN_5)
+conf_nn5 <- confusionMatrix(nn_table5)
+conf_nn5
+```
+
+Dieses Modell kommt auf eine Testaccuracy von 79 %. Auffällig ist, dass dieses Modell 20 Patient als Corona Infiziert ausgeben, obwohl die Patienten gesund sind. Wobei lediglich 2 Patienten fälschlicherweise als gesund ausgegeben werden. Die Specificity ist trotzdem sehr schwach mit nur etwas über 31 %.
+
+```{r}
+acc_nn5 <- conf_nn5$overall[1]
+sens_nn5 <- conf_nn5$byClass[1]
+spec_nn5 <- conf_nn5$byClass[2]
+```
+
+In der Übersicht erkennt man sehr deutlich, dass die beiden Neuronale Netze mit der nnet Function (einmal auf Skalierten und Encodeden Daten und einmal auf nicht vorverarbeiten) sehr ähnlich abschneiden, mit einer TestAccuracy von ca. 75%. Aber für die Vorhersage von tatsächlich Corona Infizierten sind diese beiden Modelle nicht nützlich, da Sie nur eine Specificity von 25% aufweisen.
+Das beiden Neuronalen Netze mit der Caret Library hingegen kommt auf eine Accuracy von 100% und sagt samit alle 289 Patienten im Testdatensatz korrekt voraus. Das Netz wurde mit 10 Fold Cross Validation und 3 facher Wiederholhung trainiert. Die Daten wurden zu dem min-max skaliert. 
+
+```{r}
+library(kableExtra)
+modell <- c(2,3,4,5)
+test_acc <- c(acc_nn2, acc_nn3, acc_nn4, acc_nn5)
+sens <- c(sens_nn2, sens_nn3, sens_nn4, sens_nn5)
+spec <- c(spec_nn2, spec_nn3, spec_nn4, spec_nn5)
+results_nn = data.frame(
+  "model" = modell,
+  "sensitivity" = sens,
+  "Specificity" = spec,
+  "Test Accuracy" = test_acc
+)
+
+kable_styling(kable(results_nn, format = "html", digits = 4), full_width = FALSE)
+```
+
+```{r}
+train_eng_nn <- read.csv("data/clean/train_feat_eng.csv")
+test_eng_nn <- read.csv("data/clean/test_feat_eng.csv")
+```
+
+
+```{r}
+glimpse(train_eng_nn)
+```
+
+```{r}
+set.seed(1910837262)
+up_train_eng_nn <- upSample(x = train_eng_nn[, -ncol(train_eng_nn)],
+                     y = as.factor(train_eng_nn$target))                        
+table(up_train_eng_nn$target) 
+
+```
+
+```{r}
+up_train_eng_nn <- up_train_eng_nn %>%
+  select(-Class)
+
+up_train_eng_nn_x <- up_train_eng_nn %>%
+  select(-target)
+```
+
+Nun trainieren wir noch ein Neuronales Netz mit den Inputdaten, die wir durch das Feature Engineering ein wenig verändert haben. Die weiteren Prozessschritte lassen wir aber identisch. 
+
+```{r}
+
+modell_nn6 <- train(up_train_eng_nn[,-2], up_train_eng_nn$target,
+                  method = "nnet",
+                  trControl= TrainingParameters_nn,
+                  preProcess=c("scale","center"),
+                  na.action = na.omit
+)
+```
+
+```{r}
+plot(modell_nn6)
+```
+
+Auffällig bei diesem Modell mit diesen Trainingsdaten ist, dass das jeweils beste Modell mit jeweils 5 Hidden Units ist. Bei allen 3 unterschiedlichen Weights erreicht man mit 5 Hidden Units eine Trainingsaccuracy von knapp unter 92%. Das beste Modell ist mit einem Weight Decay von 0,1.
+
+```{r}
+modell_nn6_best <- modell_nn6$bestTune
+modell_nn6_best
+```
+
+
+```{r}
+predict_testNN_6 = predict(modell_nn6, test_eng_nn)
+predict_testNN_6<-sapply(predict_testNN_6,round,digits=0)
+nn_table6 <- table(test_eng_nn$target, predict_testNN_6)
+```
+
+Dieses Modell erreicht eine Accuracy von knapp unter 90% und eine Specificity von 50%. Positiv bei diesem Modell ist, dass lediglich 2 Patienten fälschlicherweise als gesund ausgegeben werden, obwohl sie erkrankt sind.
+
+```{r}
+results_nn6 <- data.frame(actual = test_eng_nn$target, prediction = predict_testNN_6)
+conf_nn6 <- confusionMatrix(table(results_nn6$actual,results_nn6$prediction))
+conf_nn6
+```
+
+```{r}
+acc_nn6 <- conf_nn6$overall[1]
+sens_nn6 <- conf_nn6$byClass[1]
+spec_nn6 <- conf_nn6$byClass[2]
+```
+
+
+
+
+
+## Explainer für das Neural Net Model:
+
+Um die Neuronalen Netz Modelle etwas besser zu verstehen, haben wir nun noch die DALEX Library verwendet, um das NN-Modell, dass auf die Testdaten am besten abgeschnitten hat, besser erklären zu können.
+
+```{r}
+library(DALEX)
+```
+
+```{r}
+#create Explainer
+p_fun <- function(object, newdata){predict(object, newdata=newdata, type="prob")[,2]}
+
+explainer_nn <- explain(modell_nn4, label = "nn", 
+                                    data = data_test, y = as.numeric(data_test$target),
+                                    colorize = FALSE, predict_function = p_fun) 
+```
+
+```{r}
+model_perf_nn <- model_performance(explainer_nn)
+```
+
+```{r}
+plot(model_perf_nn)
+```
+
+```{r}
+plot(model_perf_nn, geom = "boxplot")
+```
+
+```{r}
+vi_classif_nn <- variable_importance(explainer_nn, loss_function = loss_root_mean_square)
+```
+
+Der Plot der Variable Importance zeigt, dass der Faktor sickness, den mit Abstand größten Einfluss auf die Prediction des Modells hat. Manche Blutwerte (Leukocytes, Hematocrit) hingegen haben so gut wie  keinen Einfluss auf den Output. 
+```{r}
+plot(vi_classif_nn)
+```
+
+Nun erstellen wir noch 2 Partial Dependence Plots mit einer "unwichtigen" Variable, in unserem Fall den Leukocyten und der Variable mit dem größten Einfluss, dem Faktor ob jemand vorerkrankt ist oder nicht.
+
+```{r}
+pdp_classif_nn_leuko <- variable_profile(explainer_nn, variable =  "Leukocytes", type = "partial" )
+pdp_classif_nn_sick <- variable_profile(explainer_nn, variable =  "sickness", type = "partial" )
+
+plot(pdp_classif_nn_leuko)
+```
+
+Je höher der Leukocyt Gehalt im Blut, desto wahrscheinlicher ist es, dass bei unserem Modell jemand als gesund klassifiziert wird. Der Zusammenhang ist bei unserem Modell fast linear.
+
+```{r}
+plot(pdp_classif_nn_sick)
+```
+
+Bei der Variable Sickness verhält es sich so, dass jemand ohne Vorerkrankung bei uns eher als Corona krank klassifiziert wird als jemand mit Vorerkrankung.
+
+```{r}
+ale_classif_nn_leuko <- variable_profile(explainer_nn, variable =  "Leukocytes", type = "accumulated")
+ale_classif_nn_sick <- variable_profile(explainer_nn, variable =  "sickness", type = "accumulated")
+```
+
+```{r}
+plot(ale_classif_nn_leuko)
+```
+
+```{r}
+plot(ale_classif_nn_sick)
+```
+
+
+## Naive Bayes Classifier
+
+```{r}
+# Naive Bayes Classifier
+
+set.seed(7267166)
+trainIndex=createDataPartition(data_clean$target, p=0.7)$Resample1
+train=data_clean[trainIndex, ]
+test=data_clean[-trainIndex, ]
+
+## check the balance
+print(table(data_clean$target))
+
+```
+
+```{r}
+# Naive Bayes Classifier
+
+library(e1071)
+
+NBclassfier_clean=naiveBayes(target~., data=train)
+print(NBclassfier_clean)
+
+```
+
+```{r}
+printALL=function(model){
+  trainPred=predict(model, newdata = train, type = "class")
+  trainTable=table(train$target, trainPred)
+  testPred=predict(model, newdata=test, type="class")
+  testTable=table(test$target, testPred)
+  trainAcc=(trainTable[1,1]+trainTable[2,2])/sum(trainTable)
+  testAcc=(testTable[1,1]+testTable[2,2])/sum(testTable)
+  message("Contingency Table for Training Data")
+  print(trainTable)
+  message("Contingency Table for Test Data")
+  print(testTable)
+  message("Accuracy")
+  print(round(cbind(trainAccuracy=trainAcc, testAccuracy=testAcc),3))
+}
+printALL(NBclassfier_clean)
+```
+
+## Naive Bayes auf den engineerten Daten
+
+```{r}
+train <- read.csv("data/clean/train_feat_eng.csv")
+test <- read.csv("data/clean/test_feat_eng.csv")
+```
+
+
+
+```{r}
+NBclassfier_eng <- naiveBayes(target~., data=train)
+#printALL(NBclassfier_eng)
+
+```
+
+
+
+```{r warning=FALSE}
+conf_nb <- confusionMatrix(table(test$target, predict(NBclassfier_clean, test)))
+```
+
+# Tree based Models
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+```
+
+```{r}
+data_clean <- read.csv("data/clean/data_clean.csv")
+set.seed(3456)
+train_idx <- createDataPartition(data_clean$target, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+data_train <- data_clean[train_idx, ]
+data_test <- data_clean[-train_idx, ]
+
+train_feat_eng <- read.csv("data/clean/train_feat_eng.csv")
+test_feat_eng <- read.csv("data/clean/test_feat_eng.csv")
+
+```
+
+```{r}
+#In einem ersten Versuch verwenden wir das Paket rpart und die originalen Featrues unseres Datensatzes.
+set.seed(200989)
+trees1_fit <- rpart(target ~., data = data_train, method = "class")
+
+#Plot des ersten Fits
+rpart.plot(trees1_fit)
+```
+
+Hier sehen wir, wie auch in anderen Modellen, dass die Leukozyten besonders wichtig für die Beurteilung / den Ausschluss einer Infektion sind.
+
+```{r}
+#Suche nach dem minimalen Fehler
+min_cp <- trees1_fit$cptable[which.min(trees1_fit$cptable[,"xerror"]),"CP"]
+min_cp
+
+#Pruning des Trees
+trees1_prune <- prune(trees1_fit, cp = min_cp)
+trees1_pruned_test_prediction <- predict(trees1_prune, newdata = data_test, type = "class")
+
+cf1 <- confusionMatrix(trees1_pruned_test_prediction, as.factor(data_test$target))
+cf1
+
+tree1_acc <- cf1[["overall"]][["Accuracy"]]
+tree1_spec <- cf1[["byClass"]][["Specificity"]]
+tree1_sens <- cf1[["byClass"]][["Sensitivity"]]
+tree1_prec <- cf1[["byClass"]][["Precision"]]
+
+
+```
+
+Als Ergebnis der Anwendung unseres ersten Baummodels bekommen wir mit 97% Accuracy, 98% Sensitivity und einer Spezifität von rund 67% bereits sehr gute Ergebnisse. Im nächsten Schritt versuchen wir, das Ergebnis mit der Verwendung der von uns erstellten Features zu verbessern.
+
+
+```{r}
+#Neuer Versuch mit neuen den neuen Features
+trees2_fit <- rpart(target ~., data = train_feat_eng, method = "class")
+trees2_prediction <- predict(trees2_fit, newdata = test_feat_eng, type = "class")
+rpart.plot(trees2_fit)
+#summary(trees2_fit)
+```
+
+
+```{r}
+#Test Confusion Matrix für den tree mit den angepassten Features
+cf2 <- confusionMatrix(trees2_prediction, as.factor(test_feat_eng$target))
+cf2
+
+tree2_acc <- cf2[["overall"]][["Accuracy"]]
+tree2_spec <- cf2[["byClass"]][["Specificity"]]
+tree2_sens <- cf2[["byClass"]][["Sensitivity"]]
+tree2_prec <- cf2[["byClass"]][["Precision"]]
+
+```
+Wir sehen nun, dass sich die Specificity auf Kosten der  Accuracy und Sensitivität verbessert - insgesamt jedoch schlechtere Ergebnisse liefert.
+
+Sehen wir nun, ob wir unsere ersten Ergebnisse mit einem Random Forest Modell verbessern können.
+
+```{r}
+#Bagging mit einem RF mit den originalen Features
+set.seed(200989)
+rf1_fit <- randomForest(as.factor(target) ~ ., data = data_train, mtry = 2, importance = TRUE, ntrees = 220, type = "classification")
+rf1_prediction <- predict(rf1_fit, newdata = data_test, type = "class")
+cf_rf1 <- confusionMatrix(rf1_prediction, as.factor(data_test$target))
+cf_rf1
+
+rf1_acc <- cf_rf1[["overall"]][["Accuracy"]]
+rf1_spec <- cf_rf1[["byClass"]][["Specificity"]]
+rf1_sens <- cf_rf1[["byClass"]][["Sensitivity"]]
+rf1_prec <- cf_rf1[["byClass"]][["Precision"]]
+```
+Das Random Forest Modell liefert uns mit einer Accuracy von 99% und einer und einer Spezifität von 67% extrem gute Ergebnisse. Sehen wir nun, ob uns die neuen Features noch etwas bringen:
+
+```{r}
+#Random Forest mit den neuen Features
+set.seed(200989)
+
+rf2_fit <- randomForest(as.factor(target) ~ ., data = train_feat_eng, mtry = 15, 
+                        importance = TRUE, ntrees = 100, type = "class")
+
+rf2_prediction <- predict(rf2_fit, newdata = test_feat_eng, type = "class")
+
+cf_rf2 <- confusionMatrix(rf2_prediction, as.factor(test_feat_eng$target))
+cf_rf2
+
+rf2_acc <- cf_rf2[["overall"]][["Accuracy"]]
+rf2_spec <- cf_rf2[["byClass"]][["Specificity"]]
+rf2_sens <- cf_rf2[["byClass"]][["Sensitivity"]]
+rf2_prec <- cf_rf2[["byClass"]][["Precision"]]
+```
+Wie auch schon beim Tree Modell verschlechtern sich hier die Ergebnisse mit den neuen Features.
+
+Zu guter letzt versuchen wir noch den besten Tune mit Hilfe einer zufälligen Suche zu finden. Das Suchsetup nutzt 15-fache CV und 3 Wiederholungen
+```{r}
+# Zufällige Suche nach dem richtigen Setup
+control_trees <- trainControl(method="repeatedcv", number=15, repeats=3, search="random")
+set.seed(200989)
+mtry_trees <- sqrt(16)
+rf_random <- train(as.factor(target)~., data=data_train, method="rf", metric="Accuracy", tuneLength=15, trControl=control_trees)
+
+print(rf_random)
+plot(rf_random)
+```
+
+Wie schlägt sich dieses Modell mit mtry 10 nun bei der Vorhersage der Test-Daten?
+
+```{r}
+rf_random_prediction <- predict(rf_random, newdata = data_test)
+cf_rf_rand <- confusionMatrix(as.factor(rf_random_prediction), as.factor(data_test$target))
+cf_rf_rand
+
+rf_rand_acc <- cf_rf_rand[["overall"]][["Accuracy"]]
+rf_rand_spec <- cf_rf_rand[["byClass"]][["Specificity"]]
+rf_rand_sens <- cf_rf_rand[["byClass"]][["Sensitivity"]]
+rf_rand_prec <- cf_rf_rand[["byClass"]][["Precision"]]
+```
+
+Auch dieses Setup liefert und die gleichen Ergebnisse wie der ursprüngliche Random Forest mit den originalen Features.
+
+Zum Abschluss sehen wir uns noch einmal die Übersicht der Ergebnisse an:
+```{r}
+library(kableExtra)
+modell_trees <- c("Tree 1", "Tree 2", "RF 1", "RF 2", "RF rand")
+tree_test_acc <- c(tree1_acc, tree2_acc, rf1_acc, rf2_acc, rf_rand_acc)
+tree_sens <- c(tree1_sens, tree2_sens, rf1_sens, rf2_sens, rf_rand_sens)
+tree_spec <- c(tree1_spec, tree2_spec, rf1_spec, rf2_spec, rf_rand_spec)
+results_trees = data.frame(
+  "model" = modell_trees,
+  "sensitivity" = tree_sens,
+  "Specificity" = tree_spec,
+  "Accuracy" = tree_test_acc
+)
+
+kable_styling(kable(results_trees, reesformat = "html", digits = 4), full_width = FALSE)
+```
+
+Wir haben gesehen, dass insbesondere die RF Modelle auf unsere Test Daten sehr gute Ergebnisse liefern. Wie jedoch bereits beschrieben, liegt hier ein "rare cases" Problem vor und es bleibt abzuwarten, wie die Modelle in anderes balancierten Datensätzen performen.
+
+
+## Beste Modelle:
+
+`
+
+```{r}
+modell <- c("SVM Radial Sigma Kernel", "Neural Network", "Naive Bayes Classifier", "Random Forest")
+accuracies <- c(CM_RS$overall[1], acc_nn4, conf_nb$overall[1], rf1_acc)
+sensitivities <- c(CM_RS$byClass[1],sens_nn4, conf_nb$byClass[1], rf1_sens)
+specificities <- c(CM_RS$byClass[2],spec_nn4, conf_nb$byClass[2], rf1_spec)
+results_overall = data.frame(
+  "model" = modell,
+  "sensitivity" = sensitivities,
+  "Specificity" = specificities,
+  "Test Accuracy" = accuracies
+)
+
+kable_styling(kable(results_overall, format = "html", digits = 4), full_width = FALSE)
+
+
+```
+
+In der Übersichtstabelle kann man sehr gut erkennen, dass sowohl das beste SVM Modell als auch das beste Tree Modell eine sehr hohe Accuracy von über 97% erreichen. Auch das Neuronale Netz erreicht nich eine gute Accuracy von über 91%. Der Unterschied zwischen den Modellen wird aber sehr stark bemerkbar wenn man auf die Specificity schaut, diese ist beim SVM mit Radial Kernel und getuntem Sigma Parameter deutlich besser als bei allen anderen Modellen mit 90%. Dieses Modell würde sich eignen für die Klassifikation von Corona Infizierten und Nicht Coronainfizierten. Das neuronale Netz und der Random Forest mit etwas mehr als 60 % Specificity schneiden hierbei schlechter ab und würden wir deshalb weil es sich hier um sehr sensible Gesundheitsdaten handelt nicht "produktiv" verwenden.
+Der Naive Bayes Classifier schneidet bei uns nur leicht besser ab als das Base Modell aus dem Proposal, die logistische Regression.
+
+## Schlussfolgerung:
+
+Wie nach der Explorativen Datenanalyse erwartet, ist bei den verschiedenen Modellen schwierig sowohl eine hohe Specificity als auch eine hohe Sensitivity zu erreichen. Unsere Modelle erzielen durchwegs eine hohe Sensitivität, wobei nur ein Modell eine Spezifizität von über 70% erreicht hat. Die Accuracy ist meistens auf einem hohen Niveau und die Unterschiede sind ziemlich gering zwischen den einzelnen Modellen. Die hohe Sensitivity ermöglicht ein relativ präzises Ausschließen von Nicht-Coronainfizierten, welches beim Testen ein wichtiger Faktor ist, um tatsächlich Infizierte besser behandeln und identifizieren zu können. Unser weiteres Vorgehen wäre, einen weiteren Test zu implementieren, der auf etwas anderen Faktoren beruht, um im Anschluss an unsere jetzige Klassifikation, die False Positives von den True Positives besser unterscheiden zu können. Im Großen und Ganzen kann man sagen, dass wir ein Modell gefunden haben, dass deutlich besser als 50:50 abschneiden würden beim Klassifizieren von Corona Patienten und dies ist bereits sehr viel Wert. Trotzdem muss gesagt werden, dass wir bei einer solch sensiblen Klassifikation auf jeden Fall ein nachgelagerten Test noch empfehlen würden.
